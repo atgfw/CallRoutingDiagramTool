@@ -949,8 +949,9 @@ function buildTreeExportHtml(system, graph, page, query) {
     incoming.add(edge.to);
   });
 
-  const roots = Array.from(graph.nodes.values()).filter((node) => !incoming.has(node.id));
-  const didRoots = roots.filter((node) => node.kind === "DID").sort((a, b) => a.title.localeCompare(b.title));
+  const didRoots = Array.from(graph.nodes.values())
+    .filter((node) => node.kind === "DID")
+    .sort((a, b) => a.title.localeCompare(b.title));
   const exportedAt = new Date().toISOString();
 
   function nodeCategory(node) {
