@@ -7,4 +7,11 @@ node_modules/
 *.zip
 *Db.xml
 3cxtestbackup/
+3CXScheduledBackup/
 *.routing.html
+
+# AI-generated project mirror
+.codex-latest/
+
+# Log files
+*.log
