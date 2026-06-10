@@ -494,6 +494,21 @@ svg {
 
 
 .node.is-muted, .edge.is-muted, .edge-chip.is-muted { opacity: 0.2; }
+
+.office-hours-badge {
+  display: inline-block;
+  margin: 6px 0 0;
+  padding: 3px 10px;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: 999px;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+.office-hours-badge.is-hidden { display: none; }
 .node.kind-did { cursor: pointer; }
 .node.is-focused .node-card { stroke-width: 2.5; stroke: #b45309; }
 .depth-lane { fill: #94a3b8; opacity: 0.06; }

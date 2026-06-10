@@ -117,6 +117,7 @@ function parseSystem(xml, sourceEntry) {
   const system = {
     sourceEntry,
     version: text(first(root, "header"), "version"),
+    officeHours: parseTenantOfficeHours(tenant),
     trunks: [],
     ivrs: {},
     ringGroups: {},
@@ -150,6 +151,7 @@ function parseSystem(xml, sourceEntry) {
         timeout: text(child, "Timeout"),
         timeoutForwardType: text(child, "TimeoutForwardType"),
         timeoutDestination: destinationFromTypeAndDn(text(child, "TimeoutForwardType"), text(child, "TimeoutForwardDN")),
+        workingHours: parseWorkingHours(child),
         officeRoute: parseRouteString(text(child, "OfficeHoursRoute")),
         outOfHoursRoute: parseRouteString(text(child, "OutOfOfficeHoursRoute")),
         breakRoute: parseRouteString(text(child, "BreakTimeRoute")),
@@ -167,6 +169,7 @@ function parseSystem(xml, sourceEntry) {
         strategy: text(child, "RingStrategy"),
         ringTime: text(child, "RingTime"),
         members: children(first(child, "Members"), "Member").map((m) => m.getAttribute("DN")).filter(Boolean),
+        workingHours: parseWorkingHours(child),
         noAnswer: parseForwardTypeDestination(firstWithFallback(child, ["NoAnswerDestination", "Destination", "NoAnswerRoute"])),
         officeHoursDestination: parseForwardTypeDestination(firstWithFallback(child, ["OfficeHoursDestination", "OfficeHoursRoute"])),
         outOfOfficeHoursDestination: parseForwardTypeDestination(firstWithFallback(child, ["OutOfOfficeHoursDestination", "OutOfOfficeHoursRoute"])),
@@ -183,6 +186,7 @@ function parseSystem(xml, sourceEntry) {
         introFile: text(child, "IntroFile"),
         onHoldFile: text(child, "OnHoldFile"),
         members: children(first(child, "Members"), "Member").map((m) => m.getAttribute("DN")).filter(Boolean),
+        workingHours: parseWorkingHours(child),
         timeoutDestination: parseForwardTypeDestination(firstWithFallback(child, ["TimeoutDestination", "Destination", "NoAnswerDestination"])),
         officeHoursDestination: parseForwardTypeDestination(firstWithFallback(child, ["OfficeHoursDestination", "OfficeHoursRoute"])),
         outOfOfficeHoursDestination: parseForwardTypeDestination(firstWithFallback(child, ["OutOfOfficeHoursDestination", "OutOfOfficeHoursRoute"])),
@@ -387,4 +391,39 @@ function descendants(el, tagName) {
 function text(el, tagName) {
   const target = tagName ? first(el, tagName) : el;
   return target?.textContent?.trim() || "";
+}
+
+function parseWorkingHours(el) {
+  const wh = first(el, "WorkingHours") || first(el, "OfficeHoursSchedule");
+  if (!wh) return null;
+  const type = wh.getAttribute("Type") || text(wh, "Type") || "";
+  const scheduleName = wh.getAttribute("ScheduleName") || text(wh, "ScheduleName") || text(wh, "Name") || "";
+  const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const schedule = {};
+  for (const day of days) {
+    // 3CX stores times either as child elements (<MonFrom>08:00</MonFrom>)
+    // or as attributes on the WorkingHours element (MonFrom="08:00").
+    const from = text(wh, `${day}From`) || wh.getAttribute(`${day}From`) || "";
+    const to = text(wh, `${day}To`) || wh.getAttribute(`${day}To`) || "";
+    if (from || to) schedule[day] = { from, to };
+  }
+  if (!type && !scheduleName && Object.keys(schedule).length === 0) return null;
+  return { type, scheduleName, schedule };
+}
+
+function parseTenantOfficeHours(tenant) {
+  const hoursEl = first(tenant, "Hours");
+  if (!hoursEl) return null;
+  const type = hoursEl.getAttribute("HoursType") || "";
+  const ignoreHolidays = /^true$/i.test(hoursEl.getAttribute("IgnoreHolidays") || "");
+  const schedule = {};
+  for (const periods of children(hoursEl, "PeriodsOfDay")) {
+    const day = periods.getAttribute("DayOfWeek") || "";
+    const slots = children(periods, "PeriodOfDay").map((p) => ({
+      begin: p.getAttribute("begin") || "",
+      end: p.getAttribute("end") || "",
+    })).filter((s) => s.begin || s.end);
+    if (day && slots.length) schedule[day] = slots;
+  }
+  return { type, ignoreHolidays, schedule };
 }

@@ -38,7 +38,7 @@ fileInput.addEventListener("change", async () => {
     welcomeCard.classList.add("is-hidden");
     setStatus(`Loaded ${file.name} from ${currentSystem.sourceEntry}.`);
     buildTrunkTabs(currentSystem);
-    render();
+    render(true);
   } catch (error) {
     console.error(error);
     currentSystem = null;
@@ -62,7 +62,7 @@ tabsEl.addEventListener("click", (event) => {
   currentPage = button.dataset.page;
   setActiveTab(button);
   updatePageHeader();
-  render();
+  render(true);
 });
 
 hoursTabsEl.addEventListener("click", (event) => {
@@ -71,7 +71,7 @@ hoursTabsEl.addEventListener("click", (event) => {
   hoursMode = button.dataset.hours || "all";
   setActiveHoursTab(button);
   updatePageHeader();
-  render();
+  render(true);
 });
 
 document.querySelector("#fit-view").addEventListener("click", () => {
@@ -79,7 +79,7 @@ document.querySelector("#fit-view").addEventListener("click", () => {
 });
 document.querySelector("#expand-all").addEventListener("click", () => {
   if (!currentSystem) return;
-  expandAllExpansibleNodes(currentSystem, expansionState);
+  expandAllExpansibleNodes(currentSystem, expansionState, currentPage);
   render();
 });
 document.querySelector("#collapse-all").addEventListener("click", () => {
@@ -105,26 +105,43 @@ document.querySelector("#export-pdf").addEventListener("click", () => {
   exportDiagramPdf();
 });
 
+document.querySelector("#export-hudu").addEventListener("click", () => {
+  if (!currentSystem || !lastRenderedGraph) return;
+  const html = buildHuduExportHtml(currentSystem, lastRenderedGraph, currentPage, lastQuery);
+  const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${currentPage}-hudu-article.html`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
 function setAppReady(isReady) {
   document.body.classList.toggle("app-ready", isReady);
 }
 
-function render() {
+function render(resetView = false) {
   if (!currentSystem) return;
 
   const query = searchInput.value.trim().toLowerCase();
-  const graph = buildGraph(currentSystem, currentPage, hoursMode);
+  // Clear stale DID focus when switching to summary view (all-trunks, no search)
+  if (currentPage === "all-trunks" && !query && focusedDidNodeId) focusedDidNodeId = null;
+  const graph = buildGraph(currentSystem, currentPage, hoursMode, query);
   const filtered = filterGraph(graph, query);
   lastRenderedGraph = filtered;
   lastQuery = query;
   renderSvg(filtered);
   renderDetails(currentSystem, currentPage, filtered, query);
   setStatus(statusForGraph(currentSystem, filtered, query));
+  if (resetView) diagramWrap.scrollTo({ top: 0, left: 0, behavior: "smooth" });
 }
 
-function buildGraph(system, page, selectedHoursMode = "all") {
+function buildGraph(system, page, selectedHoursMode = "all", query = "") {
   const trunkNumber = page === "all-trunks" ? null : page.replace("trunk:", "");
-  return buildTrunkGraph(system, trunkNumber, selectedHoursMode);
+  // Show compact summary nodes on all-trunks when no search is active
+  const useDidSummary = !trunkNumber && !query;
+  return buildTrunkGraph(system, trunkNumber, selectedHoursMode, useDidSummary);
 }
 
 function shouldShowTrunkRule(rule) {
@@ -133,7 +150,7 @@ function shouldShowTrunkRule(rule) {
   return Boolean(match || name);
 }
 
-function buildTrunkGraph(system, selectedTrunkNumber = null, selectedHoursMode = "all") {
+function buildTrunkGraph(system, selectedTrunkNumber = null, selectedHoursMode = "all", useDidSummary = false) {
   const graph = createGraph(system);
 
   system.trunks
@@ -160,29 +177,42 @@ function buildTrunkGraph(system, selectedTrunkNumber = null, selectedHoursMode =
       holidays: null,
     }];
 
-    rules.forEach((rule, ruleIndex) => {
-      const ruleId = addNode(graph, {
-        key: `did:${trunkKey}:${ruleIndex}`,
-        kind: "DID",
-        title: rule.match || rule.name || "Inbound rule",
-        sub: rule.name || rule.condition || "DID rule",
+    if (useDidSummary) {
+      // On the all-trunks overview, collapse DIDs into a single summary node per trunk
+      const summaryId = addNode(graph, {
+        key: `did-summary:${trunkKey}`,
+        kind: "Summary",
+        title: `${rules.length} DID rule${rules.length === 1 ? "" : "s"}`,
+        sub: "Select trunk tab to inspect routes",
         depth: 1,
-        search: [rule.name, rule.match, rule.condition].join(" "),
+        search: rules.map((r) => `${r.name || ""} ${r.match || ""}`).join(" "),
       });
-      addEdge(graph, trunkId, ruleId, "DID");
-      const didExpansionKey = `DID:${trunkKey}:${ruleIndex}`;
-      if (isExpanded(didExpansionKey)) {
-        if (selectedHoursMode === "all" || selectedHoursMode === "office") {
-          expandDestination(graph, rule.office, ruleId, 2, "Office hours", selectedHoursMode);
+      addEdge(graph, trunkId, summaryId, "Routes");
+    } else {
+      rules.forEach((rule, ruleIndex) => {
+        const ruleId = addNode(graph, {
+          key: `did:${trunkKey}:${ruleIndex}`,
+          kind: "DID",
+          title: rule.match || rule.name || "Inbound rule",
+          sub: rule.name || rule.condition || "DID rule",
+          depth: 1,
+          search: [rule.name, rule.match, rule.condition].join(" "),
+        });
+        addEdge(graph, trunkId, ruleId, "DID");
+        const didExpansionKey = `DID:${trunkKey}:${ruleIndex}`;
+        if (isExpanded(didExpansionKey)) {
+          if (selectedHoursMode === "all" || selectedHoursMode === "office") {
+            expandDestination(graph, rule.office, ruleId, 2, "Office hours", selectedHoursMode);
+          }
+          if (selectedHoursMode === "all" || selectedHoursMode === "after") {
+            expandDestination(graph, rule.outOfHours, ruleId, 2, "After-hours", selectedHoursMode);
+          }
+          if (selectedHoursMode === "all" || selectedHoursMode === "holiday") {
+            expandDestination(graph, rule.holidays, ruleId, 2, "Holiday", selectedHoursMode);
+          }
         }
-        if (selectedHoursMode === "all" || selectedHoursMode === "after") {
-          expandDestination(graph, rule.outOfHours, ruleId, 2, "After-hours", selectedHoursMode);
-        }
-        if (selectedHoursMode === "all" || selectedHoursMode === "holiday") {
-          expandDestination(graph, rule.holidays, ruleId, 2, "Holiday", selectedHoursMode);
-        }
-      }
-    });
+      });
+    }
   });
 
   return graph;
@@ -359,19 +389,22 @@ function destinationLabel(system, dest) {
   if (dest.kind === "IVR") {
     const ivr = system.ivrs[dest.dn];
     const extensionList = getIvrExtensions(system, ivr);
-    const detail = [ivr?.name || "Digital receptionist", extensionList && `Ext: ${extensionList}`].filter(Boolean).join(" | ");
+    const hours = formatWorkingHours(ivr?.workingHours);
+    const detail = [ivr?.name || "Digital receptionist", extensionList && `Ext: ${extensionList}`, hours && `Hours: ${hours}`].filter(Boolean).join(" | ");
     return { kind: "IVR", title: `IVR ${dest.dn}`, sub: detail };
   }
   if (dest.kind === "RingGroup") {
     const rg = system.ringGroups[dest.dn];
     const memberList = formatExtensionList(rg?.members || []);
-    const detail = [rg?.name || "", memberList && `Ext: ${memberList}`].filter(Boolean).join(" | ");
+    const hours = formatWorkingHours(rg?.workingHours);
+    const detail = [rg?.name || "", memberList && `Ext: ${memberList}`, hours && `Hours: ${hours}`].filter(Boolean).join(" | ");
     return { kind: "RingGroup", title: `Ring Group ${dest.dn}`, sub: detail };
   }
   if (dest.kind === "Queue") {
     const queue = system.queues[dest.dn];
     const memberList = formatExtensionList(queue?.members || []);
-    const detail = [queue?.name || "", memberList && `Ext: ${memberList}`].filter(Boolean).join(" | ");
+    const hours = formatWorkingHours(queue?.workingHours);
+    const detail = [queue?.name || "", memberList && `Ext: ${memberList}`, hours && `Hours: ${hours}`].filter(Boolean).join(" | ");
     return { kind: "Queue", title: `Queue ${dest.dn}`, sub: detail };
   }
   if (dest.kind === "RoutePoint") {
@@ -558,6 +591,24 @@ function nodeSizing(node) {
   return { width: 240, height, titleLines, subtitleLines };
 }
 
+function laneLabelForDepth(depth, nodes) {
+  if (depth === 0) return "Trunks";
+  if (depth === 1) return "DID Rules";
+  const kindLabel = {
+    IVR: "IVRs", RingGroup: "Ring Groups", Queue: "Queues",
+    Extension: "Extensions", VoiceMail: "Voicemail", External: "External Numbers",
+    Summary: "Members", End: "End Points", RoutePoint: "Route Points",
+  };
+  const depthNodes = nodes.filter((n) => n.depth === depth);
+  const kindCounts = new Map();
+  depthNodes.forEach((n) => kindCounts.set(n.kind, (kindCounts.get(n.kind) || 0) + 1));
+  const sorted = [...kindCounts.entries()].sort((a, b) => b[1] - a[1]);
+  if (!sorted.length) return `Level ${depth}`;
+  const [topKind, topCount] = sorted[0];
+  if (topCount / depthNodes.length >= 0.7) return kindLabel[topKind] || topKind;
+  return depth === 2 ? "Destinations" : "Routes";
+}
+
 function renderSvg(graph) {
   svg.replaceChildren();
 
@@ -602,14 +653,13 @@ function renderSvg(graph) {
   svg.append(laneLayer, edgeLayer, nodeLayer);
 
   const depths = [...new Set(graph.nodes.map((node) => node.depth))].sort((a, b) => a - b);
-  const laneNames = { 0: "Trunks", 1: "DIDs", 2: "Destinations" };
   depths.forEach((depth) => {
     const laneNodes = graph.nodes.filter((node) => node.depth === depth);
     if (!laneNodes.length) return;
     const top = Math.min(...laneNodes.map((n) => n.y)) - 22;
     const bottom = Math.max(...laneNodes.map((n) => n.y + n.size.height)) + 16;
     laneLayer.append(el("rect", { class: "depth-lane", x: 0, y: top, width, height: bottom - top }));
-    laneLayer.append(el("text", { class: "depth-lane-label", x: 14, y: top + 16 }, laneNames[depth] || `Depth ${depth}`));
+    laneLayer.append(el("text", { class: "depth-lane-label", x: 14, y: top + 16 }, laneLabelForDepth(depth, graph.nodes)));
   });
 
   graph.edges.forEach((edge) => {
@@ -676,13 +726,21 @@ function isExpandableNode(node) {
   return ["IVR", "RingGroup", "Queue", "DID"].includes(node.kind);
 }
 
-function expandAllExpansibleNodes(system, target) {
-  Object.keys(system.ivrs).forEach((dn) => target.add(`IVR:${dn}`));
-  Object.keys(system.ringGroups).forEach((dn) => target.add(`RingGroup:${dn}`));
-  Object.keys(system.queues).forEach((dn) => target.add(`Queue:${dn}`));
+function expandAllExpansibleNodes(system, target, page = "all-trunks") {
+  const selectedTrunkNumber = page === "all-trunks" ? null : page.replace("trunk:", "");
+  // Deep expansion (IVRs, ring groups, queues) only on a specific trunk tab to avoid
+  // generating unmanageably large diagrams on the all-trunks overview
+  if (selectedTrunkNumber) {
+    Object.keys(system.ivrs).forEach((dn) => target.add(`IVR:${dn}`));
+    Object.keys(system.ringGroups).forEach((dn) => target.add(`RingGroup:${dn}`));
+    Object.keys(system.queues).forEach((dn) => target.add(`Queue:${dn}`));
+  }
+  // Expand DID rules scoped to the current trunk (or all trunks on the overview)
   system.trunks.forEach((trunk, trunkIndex) => {
-    const trunkNumber = trunk.number || trunkIndex;
-    trunk.rules.forEach((_, ruleIndex) => target.add(`DID:${trunkNumber}:${ruleIndex}`));
+    const thisTrunkTabNumber = String(trunk.number || trunkIndex + 1);
+    if (selectedTrunkNumber && thisTrunkTabNumber !== selectedTrunkNumber) return;
+    const trunkKey = trunk.number || trunkIndex;
+    trunk.rules.forEach((_, ruleIndex) => target.add(`DID:${trunkKey}:${ruleIndex}`));
   });
 }
 
@@ -878,6 +936,16 @@ function getSelectedTrunk(system, page) {
 
 function updatePageHeader() {
   if (!currentSystem) return;
+  const hoursStr = formatTenantOfficeHours(currentSystem.officeHours);
+  const hoursBadge = document.querySelector("#office-hours-badge");
+  if (hoursBadge) {
+    if (hoursStr) {
+      hoursBadge.textContent = `Office hours: ${hoursStr}`;
+      hoursBadge.classList.remove("is-hidden");
+    } else {
+      hoursBadge.classList.add("is-hidden");
+    }
+  }
   const selectedTrunk = getSelectedTrunk(currentSystem, currentPage);
   if (!selectedTrunk) {
     pageTitle.textContent = "All Trunks";
@@ -910,6 +978,55 @@ function formatExtensionList(members) {
   return Array.from(new Set(members)).join(", ");
 }
 
+function formatWorkingHours(wh) {
+  if (!wh) return "";
+  const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const groups = [];
+  let current = null;
+  for (const day of days) {
+    const slot = wh.schedule?.[day];
+    if (!slot?.from || !slot?.to) { current = null; continue; }
+    const key = `${slot.from}-${slot.to}`;
+    if (current && current.key === key) {
+      current.days.push(day);
+    } else {
+      current = { key, days: [day], from: slot.from, to: slot.to };
+      groups.push(current);
+    }
+  }
+  if (groups.length === 0) return wh.scheduleName || "";
+  return groups.map((g) => {
+    const range = g.days.length === 1 ? g.days[0] : `${g.days[0]}–${g.days[g.days.length - 1]}`;
+    return `${range} ${g.from}–${g.to}`;
+  }).join(", ");
+}
+
+function formatTenantOfficeHours(officeHours) {
+  if (!officeHours) return "";
+  if (officeHours.type === "AllHours") return "All hours (24/7)";
+  const dayOrder = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const abbr = { Sunday: "Sun", Monday: "Mon", Tuesday: "Tue", Wednesday: "Wed", Thursday: "Thu", Friday: "Fri", Saturday: "Sat" };
+  const groups = [];
+  let current = null;
+  for (const day of dayOrder) {
+    const slots = officeHours.schedule[day];
+    if (!slots || !slots.length) { current = null; continue; }
+    const key = slots.map((s) => `${s.begin}-${s.end}`).join(",");
+    if (current && current.key === key) {
+      current.days.push(abbr[day]);
+    } else {
+      current = { key, days: [abbr[day]], slots };
+      groups.push(current);
+    }
+  }
+  if (!groups.length) return officeHours.type || "";
+  return groups.map((g) => {
+    const range = g.days.length === 1 ? g.days[0] : `${g.days[0]}–${g.days[g.days.length - 1]}`;
+    const times = g.slots.map((s) => `${s.begin}–${s.end}`).join(", ");
+    return `${range} ${times}`;
+  }).join("; ");
+}
+
 function getIvrExtensions(system, ivr) {
   if (!ivr) return "";
   const extensionDestinations = [
@@ -937,6 +1054,286 @@ function el(tag, attributes = {}, text = "") {
   return node;
 }
 
+
+function buildHuduExportHtml(system, graph, page, query) {
+  const huduExpandedDepth = 2;
+  const byId = new Map(Array.from(graph.nodes.values()).map((node) => [node.id, node]));
+  const outgoing = new Map();
+  const incoming = new Set();
+  graph.edges.forEach((edge) => {
+    if (!outgoing.has(edge.from)) outgoing.set(edge.from, []);
+    outgoing.get(edge.from).push(edge);
+    incoming.add(edge.to);
+  });
+
+  const didRoots = Array.from(graph.nodes.values())
+    .filter((node) => node.kind === "DID")
+    .sort((a, b) => a.title.localeCompare(b.title));
+  const exportedAt = new Date().toISOString();
+
+  function nodeCategory(node) {
+    const title = `${node?.title || ""} ${node?.sub || ""}`.toLowerCase();
+    if (!node) return "none";
+    if (node.kind === "VoiceMail") return "voicemail";
+    if (node.kind === "Extension" || title.includes("fax")) return "direct";
+    if (node.kind === "End" || title.includes("none")) return "none";
+    if (node.kind === "RingGroup" || node.kind === "Queue" || node.kind === "IVR") return "main";
+    return "other";
+  }
+
+  function classifyDid(didNode) {
+    const firstEdge = (outgoing.get(didNode.id) || [])[0];
+    const firstTarget = firstEdge ? byId.get(firstEdge.to) : null;
+    const cat = nodeCategory(firstTarget);
+    return cat === "main" ? "main" : cat === "direct" ? "direct" : cat === "voicemail" ? "voicemail" : cat === "none" ? "none" : "other";
+  }
+
+  const didRecords = didRoots.map((did) => {
+    const firstEdge = (outgoing.get(did.id) || [])[0];
+    const firstTarget = firstEdge ? byId.get(firstEdge.to) : null;
+    const officeDestination = firstTarget ? `${firstTarget.title} (${firstTarget.kind})` : "None";
+    const category = classifyDid(did);
+    let officeHours = "";
+    if (firstTarget) {
+      const dn = firstTarget.key.split(":")[1] || "";
+      const obj = firstTarget.kind === "IVR" ? system.ivrs[dn]
+        : firstTarget.kind === "Queue" ? system.queues[dn]
+        : firstTarget.kind === "RingGroup" ? system.ringGroups[dn]
+        : null;
+      officeHours = formatWorkingHours(obj?.workingHours) || "";
+    }
+    return { id: did.id, did, category, officeDestination, officeHours };
+  });
+
+  const destinationUsage = new Map();
+  didRecords.forEach((record) => {
+    const edge = (outgoing.get(record.id) || [])[0];
+    const key = edge ? edge.to : "none";
+    destinationUsage.set(key, (destinationUsage.get(key) || 0) + 1);
+  });
+  const mainSharedCount = Array.from(destinationUsage.values()).filter((count) => count > 1).reduce((sum, c) => sum + c, 0);
+  const noDestinationCount = didRecords.filter((d) => d.category === "none").length;
+  const directCount = didRecords.filter((d) => d.category === "direct").length;
+
+  function collectNotes() {
+    const notes = [];
+    const sharedByDest = new Map();
+    didRecords.forEach((record) => {
+      const edges = outgoing.get(record.id) || [];
+      const noDest = edges.length === 0 || record.category === "none";
+      if (noDest) notes.push(`DID ${record.did.title} has no destination configured (routes to None).`);
+      const firstEdge = edges[0];
+      if (firstEdge && (destinationUsage.get(firstEdge.to) || 0) > 1) {
+        const destNode = byId.get(firstEdge.to);
+        const destKey = destNode ? destNode.title : firstEdge.to;
+        if (!sharedByDest.has(destKey)) sharedByDest.set(destKey, []);
+        sharedByDest.get(destKey).push(record.did.title);
+      }
+      if (record.category === "voicemail") notes.push(`DID ${record.did.title} routes directly to voicemail during office hours.`);
+    });
+    sharedByDest.forEach((dids, dest) => {
+      notes.push(`${dids.length} DIDs share the same main route (${dest}): ${dids.join(", ")}.`);
+    });
+    graph.edges.forEach((edge) => {
+      const label = (edge.label || "").toLowerCase();
+      const timeoutMatch = label.match(/timeout\s*(\d+)/);
+      if (timeoutMatch && Number.parseInt(timeoutMatch[1], 10) >= 45) notes.push(`Long queue timeout: "${edge.label}" — callers may wait a long time before being redirected.`);
+    });
+    return notes;
+  }
+
+  const reviewNotes = collectNotes();
+
+  const KIND_LABELS = {
+    RingGroup: "Ring Group", VoiceMail: "Voice Mail", RoutePoint: "Route Point",
+    Extension: "Ext", External: "External", Queue: "Queue", IVR: "IVR",
+    DID: "DID", End: "End",
+  };
+  function kindLabel(kind) { return KIND_LABELS[kind] || kind; }
+
+  // Inline styles used throughout — Hudu strips <style> blocks so all visual
+  // design must be carried by inline attributes to survive the sanitizer.
+  const S = {
+    badge: `display:inline-block;background:#f1f5f9;border:1px solid #dbe4ee;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600;color:#64748b;margin-right:5px;vertical-align:middle;white-space:nowrap;`,
+    sub: `color:#64748b;font-size:13px;font-weight:400;`,
+    ul: `list-style:none;padding-left:16px;margin:4px 0 4px 0;border-left:2px solid #e2e8f0;`,
+    memberUl: `list-style:none;padding-left:12px;margin:4px 0;border-left:2px solid #e2e8f0;`,
+    memberLi: `padding:1px 0;font-size:13px;`,
+    cycle: `color:#b45309;font-weight:500;font-size:13px;`,
+    edgeLabel: `font-weight:700;color:#1e293b;`,
+    li: `margin:3px 0;`,
+    memberSummary: `cursor:pointer;font-size:13px;color:#475569;`,
+  };
+
+  // Build the inline HTML for a node title + optional sub-text.
+  // Suppresses the type badge when the title already begins with the type name
+  // (e.g. "Ring Group 806" needs no "Ring Group" prefix label).
+  function nodeBodyHtml(node) {
+    const titleLower = node.title.toLowerCase();
+    const showBadge = !titleLower.startsWith(kindLabel(node.kind).toLowerCase())
+                   && !titleLower.startsWith(node.kind.toLowerCase());
+    const badgeHtml = showBadge
+      ? `<span style="${S.badge}">${escapeHtml(kindLabel(node.kind))}</span>`
+      : "";
+    const subHtml = node.sub
+      ? ` &mdash; <span style="${S.sub}">${escapeHtml(node.sub)}</span>`
+      : "";
+    return `${badgeHtml}<strong>${escapeHtml(node.title)}</strong>${subHtml}`;
+  }
+
+  function renderNode(nodeId, inPath = new Set(), rendered = new Set(), depth = 0) {
+    const node = byId.get(nodeId);
+    if (!node) return "";
+    if (inPath.has(nodeId)) {
+      return `<span style="${S.cycle}">&#9888; Circular route — loops back to ${escapeHtml(node.title)}</span>`;
+    }
+    // Shared node: re-render its full subtree with fresh dedup tracking so the
+    // user can still expand and inspect it. inPath still stops true cycles.
+    if (rendered.has(nodeId)) {
+      return renderNode(nodeId, inPath, new Set(), depth);
+    }
+
+    // Member/agent summaries: collapsible list of individual extensions.
+    if (node.kind === "Summary" && (node.key.startsWith("ring-members:") || node.key.startsWith("queue-members:"))) {
+      rendered.add(nodeId);
+      const isQueue = node.key.startsWith("queue-members:");
+      const dn = node.key.replace(/^(?:ring-members:|queue-members:)/, "");
+      const members = isQueue ? (system.queues[dn]?.members || []) : (system.ringGroups[dn]?.members || []);
+      if (!members.length) return "";
+      const label = isQueue ? "Agents" : "Members";
+      const memberNums = members.join(", ");
+      const summaryLine = `${label} (${members.length}) &mdash; <span style="${S.sub}">Ext: ${escapeHtml(memberNums)}</span>`;
+      const memberItems = members.map((memberDn) => {
+        const ext = system.extensions[memberDn];
+        const name = ext ? `${ext.firstName || ""} ${ext.lastName || ""}`.trim() : "";
+        const nameHtml = name ? ` &mdash; <span style="${S.sub}">${escapeHtml(name)}</span>` : "";
+        return `<li style="${S.memberLi}">Ext <strong>${escapeHtml(memberDn)}</strong>${nameHtml}</li>`;
+      }).join("");
+      const openAttr = depth <= huduExpandedDepth ? " open" : "";
+      return `<details${openAttr} style="margin-top:4px;"><summary style="${S.memberSummary}">${summaryLine}</summary><ul style="${S.memberUl}">${memberItems}</ul></details>`;
+    }
+
+    rendered.add(nodeId);
+    const pathNext = new Set(inPath);
+    pathNext.add(nodeId);
+
+    let scheduleHtml = "";
+    if (node.kind === "IVR" || node.kind === "RingGroup" || node.kind === "Queue") {
+      const dn = node.key.split(":")[1] || "";
+      const obj = node.kind === "IVR" ? system.ivrs[dn]
+        : node.kind === "Queue" ? system.queues[dn]
+        : system.ringGroups[dn];
+      const schedStr = formatWorkingHours(obj?.workingHours);
+      if (schedStr) scheduleHtml = ` <span style="color:#94a3b8;font-size:11px;font-weight:500;">Hours: ${escapeHtml(schedStr)}</span>`;
+    }
+
+    const children = (outgoing.get(nodeId) || []).map((edge) => {
+      const dest = renderNode(edge.to, pathNext, rendered, depth + 1);
+      return `<li style="${S.li}"><b style="${S.edgeLabel}">${escapeHtml(edge.label || "Next")}:</b> ${dest}</li>`;
+    }).join("");
+
+    const body = nodeBodyHtml(node) + scheduleHtml;
+    if (!children) return body;
+    const openAttr = depth <= huduExpandedDepth ? " open" : "";
+    return `<details${openAttr} style="margin:2px 0;"><summary style="cursor:pointer;">${body}</summary><ul style="${S.ul}">${children}</ul></details>`;
+  }
+
+  const tocHtml = didRecords.map((record) =>
+    `<li><a href="#card-${escapeHtml(record.id)}">${escapeHtml(record.did.title)}</a> — ${escapeHtml(record.officeDestination)}</li>`
+  ).join("");
+
+  const CATEGORY_STYLE = {
+    main:      "background:#e0f2fe;color:#0369a1;",
+    direct:    "background:#e2e8f0;color:#334155;",
+    voicemail: "background:#e0e7ff;color:#4338ca;",
+    none:      "background:#fee2e2;color:#b91c1c;",
+    other:     "background:#ecfeff;color:#0e7490;",
+  };
+  const cardsHtml = didRecords.map((record) => {
+    const rendered = new Set();
+    const tree = renderNode(record.id, new Set(), rendered, 0);
+    const catStyle = CATEGORY_STYLE[record.category] || "background:#f1f5f9;color:#475569;";
+    const categoryBadge = `<span style="display:inline-block;${catStyle}border-radius:999px;padding:2px 9px;font-size:11px;font-weight:600;text-transform:capitalize;margin-left:8px;vertical-align:middle;">${escapeHtml(record.category)}</span>`;
+    const locationHtml = record.did.sub ? ` <span style="color:#64748b;font-size:14px;font-weight:400;">&mdash; ${escapeHtml(record.did.sub)}</span>` : "";
+    return `<details open id="card-${escapeHtml(record.id)}" style="border:1px solid #dbe4ee;border-radius:8px;padding:12px 14px;margin-bottom:10px;background:#fff;">
+      <summary style="cursor:pointer;font-weight:600;font-size:15px;list-style:none;">${escapeHtml(record.did.title)}${locationHtml}${categoryBadge}</summary>
+      <div style="color:#64748b;font-size:13px;margin:6px 0 12px;padding-bottom:8px;border-bottom:1px solid #f1f5f9;">Office-hours destination: ${escapeHtml(record.officeDestination)}${record.officeHours ? ` &mdash; Hours: <strong style="color:#475569;">${escapeHtml(record.officeHours)}</strong>` : ""}</div>
+      ${tree}
+    </details>`;
+  }).join("");
+
+  const overviewRows = didRecords.map((record) => `<tr>
+    <td>${escapeHtml(record.did.title)}</td><td>${escapeHtml(record.did.sub || "")}</td><td>${escapeHtml(record.officeDestination)}</td>
+    <td>${record.category === "none" ? `<span class="status-badge status-warn">Needs attention</span>` : `<span class="status-badge status-ok">OK</span>`}</td>
+    <td><a href="#card-${escapeHtml(record.id)}" class="view-link">View ↓</a></td>
+  </tr>`).join("");
+
+  const pageLabel = page === "all-trunks" ? "All Trunks" : page.replace("trunk:", "Trunk ");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3CX Call Routing — ${escapeHtml(pageLabel)}</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:Inter,system-ui,sans-serif;margin:0;background:#f8fafc;color:#0f172a;font-size:15px;line-height:1.6}
+.wrap{max-width:960px;margin:0 auto;padding:24px 20px}
+.panel{background:#fff;border:1px solid #dbe4ee;border-radius:10px;padding:20px;margin-bottom:16px}
+h1{margin:0 0 6px;font-size:22px;font-weight:700;letter-spacing:-0.3px}
+h2{margin:0 0 14px;font-size:16px;font-weight:600;color:#1e293b;text-transform:uppercase;letter-spacing:0.5px}
+.meta{color:#64748b;font-size:13px;margin-top:4px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-top:16px}
+.stat{border:1px solid #dbe4ee;border-radius:8px;padding:14px 12px;background:#f8fafc}
+.stat strong{font-size:26px;font-weight:700;display:block;color:#0f172a;line-height:1}
+.stat span{font-size:12px;color:#64748b;display:block;margin-top:4px;font-weight:500;text-transform:uppercase;letter-spacing:0.4px}
+.toc{margin:0;padding:0 0 0 18px;line-height:2.2}.toc a{color:#1463a5;text-decoration:none}.toc a:hover{text-decoration:underline}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:10px 8px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:middle}
+th{background:#f1f5f9;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.4px;color:#475569}
+tr:last-child td{border-bottom:none}
+.view-link{color:#1463a5;font-size:13px;text-decoration:none;font-weight:600}.view-link:hover{text-decoration:underline}
+.status-badge{display:inline-block;border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600}
+.status-ok{background:#dcfce7;color:#166534}.status-warn{background:#fee2e2;color:#b91c1c}
+.notes{padding-left:18px}.notes li{margin-bottom:8px;font-size:14px;line-height:1.5}
+details>summary{cursor:pointer;user-select:none}
+@media print{.wrap{padding:0}.panel{border:1px solid #ccc;break-inside:avoid}details{display:block}details>summary~*{display:block}}
+@media(max-width:640px){.wrap{padding:12px}th:nth-child(2),td:nth-child(2){display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<section class="panel">
+  <h1>3CX Call Routing &mdash; ${escapeHtml(pageLabel)}</h1>
+  <p class="meta">Exported: ${escapeHtml(exportedAt)} &nbsp;|&nbsp; Source: ${escapeHtml(system.sourceEntry)}${query ? ` &nbsp;|&nbsp; Filter: ${escapeHtml(query)}` : ""} &nbsp;|&nbsp; Trunks: ${system.trunks.length}</p>
+  <div class="stats">
+    <div class="stat"><strong>${didRecords.length}</strong><span>DIDs</span></div>
+    <div class="stat"><strong>${mainSharedCount}</strong><span>Shared-route DIDs</span></div>
+    <div class="stat"><strong>${directCount}</strong><span>Direct endpoints</span></div>
+    <div class="stat"><strong>${noDestinationCount}</strong><span>Need attention</span></div>
+    ${formatTenantOfficeHours(system.officeHours) ? `<div class="stat" style="grid-column:1/-1;background:#eff6ff;border-color:#bfdbfe;"><strong style="font-size:14px;color:#1d4ed8;">${escapeHtml(formatTenantOfficeHours(system.officeHours))}</strong><span>Office hours</span></div>` : ""}
+  </div>
+</section>
+<section class="panel">
+  <h2>Table of Contents</h2>
+  <ul class="toc">${tocHtml}</ul>
+</section>
+<section class="panel">
+  <h2>DID Overview</h2>
+  <table><thead><tr><th>DID</th><th>Label / Name</th><th>Office-hours destination</th><th>Status</th><th></th></tr></thead>
+  <tbody>${overviewRows}</tbody></table>
+</section>
+${reviewNotes.length ? `<section class="panel"><h2>Review Notes</h2><ul class="notes">${reviewNotes.map((note) => `<li>${escapeHtml(note)}</li>`).join("")}</ul></section>` : ""}
+<section class="panel">
+  <h2>DID Routing Details</h2>
+  <p class="meta" style="margin-bottom:16px">Click any row to expand or collapse its routing tree. Rows open to two levels by default.</p>
+  ${cardsHtml}
+</section>
+</div>
+</body>
+</html>`;
+}
 
 function buildTreeExportHtml(system, graph, page, query) {
   const defaultExpandedDepth = 1;
@@ -976,7 +1373,16 @@ function buildTreeExportHtml(system, graph, page, query) {
     const firstTarget = firstEdge ? byId.get(firstEdge.to) : null;
     const officeDestination = firstTarget ? `${firstTarget.title} (${firstTarget.kind})` : "None";
     const category = classifyDid(did);
-    return { id: did.id, did, category, officeDestination };
+    let officeHours = "";
+    if (firstTarget) {
+      const dn = firstTarget.key.split(":")[1] || "";
+      const obj = firstTarget.kind === "IVR" ? system.ivrs[dn]
+        : firstTarget.kind === "Queue" ? system.queues[dn]
+        : firstTarget.kind === "RingGroup" ? system.ringGroups[dn]
+        : null;
+      officeHours = formatWorkingHours(obj?.workingHours) || "";
+    }
+    return { id: did.id, did, category, officeDestination, officeHours };
   });
 
   const destinationUsage = new Map();
@@ -1018,14 +1424,46 @@ function buildTreeExportHtml(system, graph, page, query) {
     if (inPath.has(nodeId)) {
       return `<div class="diag cycle">Cycle detected (${escapeHtml(node.title)} → … → ${escapeHtml(node.title)}).</div>`;
     }
+    // Shared node: re-render its full subtree with fresh dedup tracking so the
+    // user can still expand and inspect it. inPath still stops true cycles.
     if (rendered.has(nodeId)) {
-      return `<div class="diag ref">Reference to previously rendered node: ${escapeHtml(node.title)}.</div>`;
+      return renderNode(nodeId, inPath, new Set(), depth);
     }
+    // Member/agent summaries: render expandable list with extension names
+    if (node.kind === "Summary" && (node.key.startsWith("ring-members:") || node.key.startsWith("queue-members:"))) {
+      rendered.add(nodeId);
+      const isQueue = node.key.startsWith("queue-members:");
+      const dn = node.key.replace(/^(?:ring-members:|queue-members:)/, "");
+      const members = isQueue ? (system.queues[dn]?.members || []) : (system.ringGroups[dn]?.members || []);
+      const memberNums = members.join(", ");
+      const summarySub = memberNums ? `<div class="node-sub">${escapeHtml(memberNums)}</div>` : "";
+      const summaryBody = `<div class="node-row"><span class="kind-badge kind-${isQueue ? "queue" : "ringgroup"}">${escapeHtml(isQueue ? "Agents" : "Members")}</span><strong>${escapeHtml(node.title)}</strong>${summarySub}</div>`;
+      if (!members.length) return `<div class="leaf">${summaryBody}</div>`;
+      const memberItems = members.map((memberDn) => {
+        const ext = system.extensions[memberDn];
+        const name = ext ? `${ext.firstName || ""} ${ext.lastName || ""}`.trim() : "";
+        const nameHtml = name ? ` — <span class="node-sub" style="display:inline">${escapeHtml(name)}</span>` : "";
+        return `<li><div class="edge-row"><div class="node-row"><span class="kind-badge kind-extension">Ext</span><strong>${escapeHtml(memberDn)}</strong>${nameHtml}</div></div></li>`;
+      }).join("");
+      const openAttr = depth <= defaultExpandedDepth ? " open" : "";
+      return `<details class="branch depth-${depth}"${openAttr}><summary>${summaryBody}</summary><ul>${memberItems}</ul></details>`;
+    }
+
     rendered.add(nodeId);
     const pathNext = new Set(inPath);
     pathNext.add(nodeId);
+
+    // Append office hours schedule to sub for IVR, RingGroup, Queue nodes
+    let subText = node.sub || "";
+    if (node.kind === "IVR" || node.kind === "RingGroup" || node.kind === "Queue") {
+      const dn = node.key.split(":")[1] || "";
+      const obj = node.kind === "IVR" ? system.ivrs[dn] : node.kind === "Queue" ? system.queues[dn] : system.ringGroups[dn];
+      const scheduleStr = formatWorkingHours(obj?.workingHours);
+      if (scheduleStr) subText = [subText, scheduleStr].filter(Boolean).join(" | ");
+    }
+
     const children = (outgoing.get(nodeId) || []).map((edge) => `<li><div class="edge-row"><span class="edge-label">${escapeHtml(edge.label || "Next")}</span>${renderNode(edge.to, pathNext, rendered, depth + 1)}</div></li>`).join("");
-    const sub = node.sub ? `<div class="node-sub">${escapeHtml(node.sub)}</div>` : "";
+    const sub = subText ? `<div class="node-sub">${escapeHtml(subText)}</div>` : "";
     const body = `<div class="node-row"><span class="kind-badge kind-${escapeHtml(node.kind.toLowerCase())}">${escapeHtml(node.kind)}</span><strong>${escapeHtml(node.title)}</strong>${sub}</div>`;
     if (!children) return `<div class="leaf">${body}</div>`;
     const openAttr = depth <= defaultExpandedDepth ? " open" : "";
@@ -1037,7 +1475,7 @@ function buildTreeExportHtml(system, graph, page, query) {
     const tree = renderNode(record.id, new Set(), rendered, 0);
     return `<details class="did-card" open data-did-card data-category="${escapeHtml(record.category)}" data-search="${escapeHtml(`${record.did.title} ${record.did.sub || ""} ${record.officeDestination}`.toLowerCase())}" id="card-${escapeHtml(record.id)}">
       <summary><div class="card-head"><span>${escapeHtml(record.did.title)}</span><span class="route-badge ${escapeHtml(record.category)}">${escapeHtml(record.category)}</span></div></summary>
-      <div class="card-meta">${escapeHtml(record.did.sub || "(no label)")} • Office-hours destination: ${escapeHtml(record.officeDestination)}</div>
+      <div class="card-meta">${escapeHtml(record.did.sub || "(no label)")} • Office-hours destination: ${escapeHtml(record.officeDestination)}${record.officeHours ? ` • Hours: ${escapeHtml(record.officeHours)}` : ""}</div>
       <div class="route-tree">${tree}</div>
     </details>`;
   }).join("");
@@ -1065,14 +1503,14 @@ table{width:100%;border-collapse:collapse;font-size:14px}th,td{padding:8px;borde
 .node-row{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap}.kind-badge{font-size:11px;padding:2px 6px;border-radius:999px;background:#f1f5f9}
 .edge-label{font-weight:600;color:#334155;margin-right:8px}.edge-row{margin:6px 0}.node-sub{color:#64748b;font-size:13px;flex:1 1 100%}
 details>summary{list-style:none;cursor:pointer} details>summary::-webkit-details-marker{display:none}
-.diag.ref{color:#1d4ed8}.diag.cycle{color:#9a3412}.notes li{margin-bottom:6px}
+.shared-note{font-size:11px;color:#94a3b8;margin-left:6px;font-weight:400;}.diag.cycle{color:#9a3412}.notes li{margin-bottom:6px}
 @media (max-width:700px){.wrap{padding:10px}th:nth-child(2),td:nth-child(2){display:none}}
 </style>
 </head>
 <body>
 <div class="wrap">
 <section class="panel"><h1>3CX Call Routing Tree</h1><p class="meta">Page: ${escapeHtml(page)} | Filter: ${escapeHtml(query || "(none)")} | Exported: ${escapeHtml(exportedAt)} | Trunks: ${system.trunks.length}</p>
-<div class="stats"><div class="stat"><strong>${didRecords.length}</strong><div>DIDs</div></div><div class="stat"><strong>${mainSharedCount}</strong><div>Main/shared route DIDs</div></div><div class="stat"><strong>${directCount}</strong><div>Direct endpoints</div></div><div class="stat"><strong>${noDestinationCount}</strong><div>Need attention (None)</div></div></div></section>
+<div class="stats"><div class="stat"><strong>${didRecords.length}</strong><div>DIDs</div></div><div class="stat"><strong>${mainSharedCount}</strong><div>Main/shared route DIDs</div></div><div class="stat"><strong>${directCount}</strong><div>Direct endpoints</div></div><div class="stat"><strong>${noDestinationCount}</strong><div>Need attention (None)</div></div>${formatTenantOfficeHours(system.officeHours) ? `<div class="stat" style="background:#eff6ff;border-color:#bfdbfe;"><strong style="font-size:13px;">${escapeHtml(formatTenantOfficeHours(system.officeHours))}</strong><div style="color:#1d4ed8;font-weight:600;">Office hours</div></div>` : ""}</div></section>
 <section class="panel toolbar"><input id="search" placeholder="Search DID, route, extension, queue, IVR, voicemail, person, destination"><select id="route-filter"><option value="all">All routes</option><option value="main">Main/shared route</option><option value="direct">Direct extension or fax</option><option value="voicemail">Voicemail</option><option value="none">No destination</option><option value="other">Other queue/ring group</option></select><button id="expand-all">Expand all</button><button id="collapse-all">Collapse all</button><button id="clear-filters">Clear filters</button></section>
 <section class="panel"><h2>DID Overview</h2><table><thead><tr><th>DID</th><th>Label/name</th><th>Office-hours destination</th><th>Result/notes</th><th></th></tr></thead><tbody id="overview-body">${overviewRows}</tbody></table></section>
 <section class="panel"><h2>Main Shared Route Summary</h2><p class="meta">Inbound DID(s) → Shared destination → No answer/timeout → IVR/options → final destination (as detected by existing traversal paths).</p></section>
@@ -1137,6 +1575,8 @@ function exportDiagramPdf() {
   const svgMarkup = svg.outerHTML;
   const pageLabel = currentPage === "all-trunks" ? "All Trunks" : currentPage.replace("trunk:", "Trunk ");
 
+  const officeHoursStr = formatTenantOfficeHours(currentSystem?.officeHours);
+
   const exportHtml = `<!doctype html>
 <html lang="en">
 <head>
@@ -1149,6 +1589,7 @@ body { margin: 0; color: #0f172a; font-family: Inter, Segoe UI, Arial, sans-seri
 .company { font-weight: 800; letter-spacing: 0.02em; font-size: 14px; }
 .meta, .sub { color: #475569; font-size: 11px; }
 .sub { margin-top: 4px; }
+.hours-badge { display: inline-block; margin-top: 5px; padding: 2px 8px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 999px; color: #1d4ed8; font-size: 10px; font-weight: 600; }
 .diagram { border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px; break-inside: avoid; }
 .diagram svg { width: 100%; height: auto; background: white; }
 .diagram .edge { fill: none; stroke: #8695a1; stroke-width: 2; }
@@ -1194,6 +1635,7 @@ body { margin: 0; color: #0f172a; font-family: Inter, Segoe UI, Arial, sans-seri
     <div class="company">3CX Call Routing Diagram Tool</div>
     <div class="meta">Tenant source: ${escapeHtml(currentSystem.sourceEntry)} | Exported: ${escapeHtml(exportedAt)} | Scope: ${escapeHtml(pageLabel)} | Filter: ${escapeHtml(filterText)}</div>
     <div class="sub">${escapeHtml(title)} — ${escapeHtml(subtitle)}</div>
+    ${officeHoursStr ? `<div><span class="hours-badge">Office hours: ${escapeHtml(officeHoursStr)}</span></div>` : ""}
   </div>
   <div class="diagram">${svgMarkup}</div>
   ${legendEnabled ? `<div class="legend">
